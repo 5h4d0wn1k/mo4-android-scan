@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <base-config android:cleartextTrafficPermitted="false" />
+    <domain-config android:cleartextTrafficPermitted="true">
+        <domain android:includeSubdomains="true">cdn.lab.example.com</domain>
+        <trust-anchors>
+            <certificates android:src="system" />
+        </trust-anchors>
+        <pin-set expiration="2027-01-01">
+            <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+        </pin-set>
+    </domain-config>
+</network-security-config>

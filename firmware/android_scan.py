@@ -19,6 +19,8 @@ WARNING: Educational use only. Only scan APKs you own or are authorized to asses
 """
 
 import argparse
+import json
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -326,6 +328,58 @@ class AndroidManifestScanner:
 
         print("\n" + "=" * 60)
 
+    def check_netsec_config(self, config_text):
+        """Parse a res/xml/network_security_config.xml blob for cleartext/CA weaknesses."""
+        if not config_text:
+            self.findings.append({"severity": "MEDIUM", "category": "netsec_missing",
+                                  "detail": "networkSecurityConfig referenced but file not supplied"})
+            return
+        ns = "{http://schemas.android.com/apk/res/android}"
+        try:
+            root = ET.fromstring(config_text)
+        except ET.ParseError as e:
+            self.findings.append({"severity": "HIGH", "category": "netsec_parse",
+                                  "detail": f"network_security_config parse failure: {e}"})
+            return
+        for base in root.findall("base-config"):
+            cleartext = base.attrib.get(f"{ns}cleartextTrafficPermitted", "false")
+            if cleartext.lower() == "true":
+                self.findings.append({"severity": "CRITICAL", "category": "netsec_cleartext",
+                                      "detail": "base-config permits cleartext traffic globally"})
+                print("  [!!] CRITICAL: netsec base-config permits cleartext globally")
+            else:
+                print("  [OK] netsec base-config: cleartext not permitted")
+        for dc in root.findall("domain-config"):
+            cleartext = dc.attrib.get(f"{ns}cleartextTrafficPermitted", "false")
+            domain = dc.attrib.get(f"{ns}domain", "?")
+            if cleartext.lower() == "true":
+                self.findings.append({"severity": "HIGH", "category": "netsec_domain_cleartext",
+                                      "detail": f"domain '{domain}' permits cleartext"})
+                print(f"  [!!] HIGH: domain '{domain}' permits cleartext")
+        for ts in root.findall(".//trust-anchors"):
+            for cert in ts.findall("certificates"):
+                src = cert.attrib.get(f"{ns}src", "system")
+                if src == "user":
+                    self.findings.append({"severity": "HIGH", "category": "netsec_user_ca",
+                                          "detail": "network security config trusts user-supplied CAs"})
+                    print("  [!!] HIGH: trusts user-supplied CAs")
+        for pc in root.findall(".//pin-set"):
+            if pc.attrib.get("expiration"):
+                self.findings.append({"severity": "INFO", "category": "netsec_pin_expiry",
+                                      "detail": "pin-set defines an expiration"})
+
+    def summary(self):
+        sev_counts = {}
+        for f in self.findings:
+            sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
+        return {
+            "package": self.root.attrib.get("package", "unknown") if self.root is not None else None,
+            "findings": self.findings,
+            "severity_counts": sev_counts,
+            "permissions": self.permissions,
+            "component_counts": {k: len(v) for k, v in self.components.items()},
+        }
+
     def run(self):
         print("\n" + "=" * 60)
         print("  MO4 — Android Vulnerability Scanner")
@@ -336,27 +390,137 @@ class AndroidManifestScanner:
         return self.findings
 
 
+FIXTURE_HARDENED = """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.lab.hardenedmobile"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="33" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:label="@string/app_name">
+
+        <activity android:name=".MainActivity"
+            android:exported="false" />
+        <activity android:name=".PinActivity"
+            android:exported="false" />
+
+        <service android:name=".SyncService"
+            android:exported="false" />
+
+        <receiver android:name=".AlarmReceiver"
+            android:exported="false" />
+
+        <provider android:name=".DatabaseProvider"
+            android:authorities="com.lab.hardenedmobile.db"
+            android:exported="false" />
+    </application>
+</manifest>
+"""
+
+FIXTURE_NETSEC = """<?xml version="1.0" encoding="utf-8"?>
+<network-security-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <base-config android:cleartextTrafficPermitted="false" />
+    <domain-config android:cleartextTrafficPermitted="true">
+        <domain android:includeSubdomains="true">cdn.lab.example.com</domain>
+        <trust-anchors>
+            <certificates android:src="system" />
+        </trust-anchors>
+        <pin-set expiration="2027-01-01">
+            <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+        </pin-set>
+    </domain-config>
+</network-security-config>
+"""
+
+
+def create_fixtures(fixtures_dir):
+    """Write deterministic scan fixtures (manifests + netsec config)."""
+    os.makedirs(fixtures_dir, exist_ok=True)
+    specs = {
+        "vulnerable_manifest.xml": SAMPLE_MANIFEST,
+        "hardened_manifest.xml": FIXTURE_HARDENED,
+        "network_security_config.xml": FIXTURE_NETSEC,
+    }
+    for name, content in specs.items():
+        with open(os.path.join(fixtures_dir, name), "w") as f:
+            f.write(content)
+    return specs
+
+
+def run_demo(report_dir="reports"):
+    """Offline demo: scan vulnerable + hardened fixtures, write JSON. Exit 0."""
+    os.makedirs(report_dir, exist_ok=True)
+    fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures")
+    create_fixtures(fixtures_dir)
+    out = {}
+    vulnerable = os.path.join(fixtures_dir, "vulnerable_manifest.xml")
+    hardened = os.path.join(fixtures_dir, "hardened_manifest.xml")
+    for name, path in (("vulnerable", vulnerable), ("hardened", hardened)):
+        with open(path) as f:
+            scanner = AndroidManifestScanner(f.read())
+            if name == "vulnerable":
+                with open(os.path.join(fixtures_dir, "network_security_config.xml")) as nf:
+                    scanner.check_netsec_config(nf.read())
+            scanner.run()
+            out[name] = scanner.summary()
+    report = os.path.join(report_dir, "mo4_demo_report.json")
+    with open(report, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"[*] JSON report written: {report}")
+    return 0
+
+
 def main():
-    parser = argparse.ArgumentParser(description="MO4 — Android Vulnerability Scanner")
-    parser.add_argument("--manifest", "-m", help="Path to AndroidManifest.xml (uses demo if omitted)")
+    parser = argparse.ArgumentParser(
+        description="MO4 — Android Vulnerability Scanner (OWASP MASVS-style manifest analysis)")
+    parser.add_argument("--manifest", "-m", help="Path to AndroidManifest.xml (offline demo if omitted)")
+    parser.add_argument("--netsec-config", help="Path to res/xml/network_security_config.xml")
+    parser.add_argument("--json", action="store_true", help="write JSON report to reports/")
+    parser.add_argument("--report-dir", default="reports", help="report dir (default: reports)")
+    parser.add_argument("--make-fixture", action="store_true", help="regenerate fixtures and exit")
     args = parser.parse_args()
 
-    manifest_text = None
-    if args.manifest:
-        try:
-            with open(args.manifest) as f:
-                manifest_text = f.read()
-            print(f"Loaded manifest from: {args.manifest}")
-        except Exception as e:
-            print(f"ERROR: Could not read manifest: {e}")
-            sys.exit(1)
-    else:
-        print("No manifest provided — using embedded demo data")
+    if args.make_fixture:
+        fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures")
+        create_fixtures(fixtures_dir)
+        print(f"[*] Fixtures written to {os.path.abspath(fixtures_dir)}")
+        return 0
+
+    if not args.manifest:
+        return run_demo(args.report_dir)
+
+    try:
+        with open(args.manifest) as f:
+            manifest_text = f.read()
+    except OSError as e:
+        print(f"[!] ERROR: Could not read manifest: {e}")
+        return 2
+    print(f"Loaded manifest from: {args.manifest}")
 
     scanner = AndroidManifestScanner(manifest_text)
-    findings = scanner.run()
+    if args.netsec_config:
+        try:
+            with open(args.netsec_config) as f:
+                scanner.check_netsec_config(f.read())
+        except OSError as e:
+            print(f"[!] ERROR: Could not read netsec config: {e}")
+            return 2
+    scanner.run()
 
-    print("\nDone.")
+    if args.json:
+        os.makedirs(args.report_dir, exist_ok=True)
+        out = os.path.join(args.report_dir, "mo4_report.json")
+        with open(out, "w") as f:
+            json.dump(scanner.summary(), f, indent=2)
+        print(f"[*] JSON report written: {out}")
     return 0
 
 

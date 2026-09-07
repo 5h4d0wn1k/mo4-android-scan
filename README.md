@@ -1,121 +1,93 @@
 # MO4 — Android Vulnerability Scanner
 
-OWASP MASVS-style checklist scanner for AndroidManifest.xml security analysis.
+OWASP MASVS-style checklist scanner for `AndroidManifest.xml` and the
+`network_security_config.xml` it may reference. Runs offline against fixtures.
+Standard-library only.
 
-## Overview
+## What the engine genuinely does
 
-This project implements an automated Android manifest vulnerability scanner that:
-- Parses AndroidManifest.xml from text input or uses an embedded sample
-- Checks exported components (activities, services, receivers, providers)
-- Detects backup-allowed flag and cleartext traffic permission
-- Flags debuggable apps, missing minSdk, and outdated targetSdk
-- Identifies suspicious permission combinations (SMS + network, background location)
-- Detects permission over-declaration patterns
-- Produces MASVS-style findings with severity ratings
+- **Manifest parsing** — real XML parse of `AndroidManifest.xml` (package,
+  `uses-sdk`, permissions).
+- **Exported component analysis** — activities/services/receivers/providers
+  flagged by `android:exported` (with implicit-export by intent-filter logic).
+- **Application flags** — `android:debuggable`, `android:allowBackup`,
+  `android:usesCleartextTraffic`.
+- **Network security config** — parses `res/xml/network_security_config.xml`:
+  `base-config` / `domain-config` cleartext permissions, user-supplied CAs
+  (`trust-anchors`), `pin-set` expiry.
+- **Permission posture** — dangerous-permission counting, SUSPICIOUS permission
+  tiers, SMS+network exfiltration combo, background location.
+- **SDK checks** — `minSdkVersion < 23`, outdated `targetSdkVersion`.
+- **Findings** — MASVS-style severities (`CRITICAL`..`INFO`) plus a JSON summary.
 
-## Features
-
-- **Manifest Parsing**: Full AndroidManifest.xml XML parsing with namespace support
-- **Exported Component Detection**: Activities, services, receivers, providers with intent-filter analysis
-- **Application Flags**: debuggable, allowBackup, usesCleartextTraffic checks
-- **SDK Analysis**: minSdkVersion and targetSdkVersion security review
-- **Permission Analysis**: Dangerous permission counting, suspicious combos, over-declaration
-- **MASVS-Style Findings**: CRITICAL/HIGH/MEDIUM severity ratings with categories
-
-## Dependencies
-
-**None** — uses only Python standard library (`xml.etree.ElementTree`, `re`, `argparse`, `collections`).
-
-## Installation
+## Quick start
 
 ```bash
-# No external dependencies required
-python3 android_scan.py
+# Offline demo (scans fixture manifests+netsec, writes reports/, exit 0)
+python3 firmware/android_scan.py
+
+# Scan a real manifest with its network security config
+python3 firmware/android_scan.py --manifest AndroidManifest.xml \
+    --netsec-config res/xml/network_security_config.xml --json
+
+# Rebuild fixtures
+python3 firmware/android_scan.py --make-fixture
+
+# Tests
+python3 -m unittest discover -s tests
 ```
 
-## Usage
-
-```bash
-# Run demo with embedded vulnerable manifest
-python3 android_scan.py
-
-# Scan a specific manifest file
-python3 android_scan.py --manifest AndroidManifest.xml
-```
-
-## Example Output
+## CLI
 
 ```
-============================================================
-  MO4 — Android Vulnerability Scanner
-============================================================
-  OWASP MASVS-style Manifest Analysis
-
-============================================================
-  PARSING ANDROIDMANIFEST.XML
-============================================================
-  Package: com.example.vulnerableapp
-  minSdkVersion: 21
-  targetSdkVersion: 28
-  Permissions declared: 16
-
-============================================================
-  PERMISSION ANALYSIS
-============================================================
-  [!!] HIGH: Permission over-declaration — 15 dangerous permissions
-  [!!] CRITICAL: SEND_SMS
-  [!!] CRITICAL: SMS + NETWORK permission combo — exfiltration risk
-  [!!] CRITICAL: Background location access enabled
-
-============================================================
-  APPLICATION FLAGS
-============================================================
-  [!!] CRITICAL: App is debuggable — allows debugger attachment
-  [!!] HIGH: allowBackup=true — data extractable via adb backup
-  [!!] HIGH: usesCleartextTraffic=true — HTTP traffic allowed
-
-  MASVS-STYLE FINDINGS SUMMARY
-  CRITICAL  : 5
-  HIGH      : 10
-  MEDIUM    : 6
+python3 firmware/android_scan.py [-h] [-m MANIFEST] [--netsec-config NETSEC_CONFIG]
+                                 [--json] [--report-dir REPORT_DIR] [--make-fixture]
 ```
+
+- `--manifest/-m` — path to an `AndroidManifest.xml`; omitted → offline demo.
+- `--netsec-config` — referenced `network_security_config.xml` to analyze.
+- `--json` — write JSON summary to `reports/`.
+- `--report-dir` — report directory (default `reports`).
+- `--make-fixture` — regenerate fixtures and exit.
+
+Exit codes: `0` success (incl. demo), `2` input error.
+
+## Live Lab Test Plan
+
+Prerequisites: an APK (or just a manifest) you own or are authorized to assess —
+the fixture app `com.example.vulnerableapp` stands in offline.
+
+1. **Baseline**: `python3 firmware/android_scan.py` — confirm vulnerable vs.
+   hardened fixture findings separate cleanly (vulnerable has CRITICAL+HIGH,
+   hardened has < 3 low-severity findings).
+2. **Real target**: decompile a permitted app (apktool) and run the scanner on
+   its `AndroidManifest.xml` + `res/xml/network_security_config.xml`. Manually
+   verify every exported component and cleartext flag against the APK.
+3. **Differential**: confirm removing `android:exported="true"` and setting
+   `allowBackup=false` removes the corresponding findings (regression guard).
+4. **JSON output**: verify `reports/mo4_report.json` contains
+   `severity_counts`, `component_counts`, and the full findings array.
+5. **Regression**: re-run `python3 -m unittest discover -s tests`.
+
+## Metrics
+
+| Metric                     | Value |
+|----------------------------|-------|
+| Standard-library only      | Yes   |
+| Third-party deps           | none  |
+| Deterministic offline tests| 18    |
+| Fixtures                   | vulnerable + hardened manifest, netsec config |
+| Offline demo exit          | 0     |
+| Report output              | `reports/*.json` (gitignored) |
+| Inputs                     | AndroidManifest.xml, network_security_config.xml |
 
 ## IMPORTANT: Read before use.
 
-This project is provided for **educational and authorized security testing purposes only**.
-
-### Authorization Requirements
-- You MUST have explicit written permission from the app owner before using this tool
-- Unauthorized reverse engineering of mobile apps may violate applicable laws
-- This tool should ONLY be used on APKs you own or have written authorization to test
-
-### Legal Framework
-- **Computer Fraud and Abuse Act (CFAA)**: Unauthorized access to computer systems is a federal crime
-- **DMCA (17 U.S.C. § 1201)**: Circumventing software protection measures may violate copyright law
-- **State Laws**: Many states have additional computer crime and reverse engineering statutes
-- **OWASP MASVS**: Findings align with Mobile Application Security Verification Standard
-
-### Acceptable Use
-- Security assessment of your own Android applications
-- Authorized penetration testing with written scope
-- Academic research in controlled lab environments
-- Security education and training
-
-### Prohibited Use
-- Scanning or reverse engineering apps you do not own
-- Distributing exploits or vulnerability details publicly
-- Any activity that violates applicable laws or regulations
-- Commercial use without proper licensing
-
-### No Warranty
-This software is provided "AS IS" without warranty of any kind. The author is not responsible for any misuse or damage caused by this software.
-
-### Responsible Disclosure
-If you discover vulnerabilities using this tool, follow responsible disclosure practices:
-1. Report to the app developer privately
-2. Allow reasonable time for remediation
-3. Do not exploit beyond proof of concept
+Educational, authorization-required tooling. See `LICENSE` for the full shield —
+Authorization, CFAA / computer-crime statutes, Acceptable Use, Prohibited Use,
+No Warranty, and Responsible Disclosure. Only scan apps you own or are
+explicitly authorized to assess.
 
 ## License
 
-MIT
+MIT — full legal shield in `LICENSE`.
